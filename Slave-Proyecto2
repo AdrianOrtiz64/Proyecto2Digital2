@@ -1,0 +1,234 @@
+//******************************************/
+// BE3029 - Electronica Digital 2
+// 03/11/2025
+// Proyecto 2 - Comunicación Serial
+// MCU: ESP32 dev kit 1.0
+//******************************************/
+
+//******************************************/
+// Librerias
+//******************************************/
+#include <Arduino.h>
+#include <ESP32SPISlave.h>
+#include <LiquidCrystal.h>
+#include "Wire.h"
+
+//******************************************/
+// Definiciones
+//******************************************/
+#define PIN_MOSI 23
+#define PIN_MISO 19
+#define PIN_SCK  18
+#define PIN_CS   5
+
+#define RS 4
+#define EN 32
+#define D4 15
+#define D5 25
+#define D6 13
+#define D7 27
+
+#define LED_VERDE     14
+#define LED_AMARILLO  26
+#define LED_ROJO      33
+
+#define POT1 35
+
+#define I2C_ADDRESS 0x64
+
+//******************************************/
+// Variables globales
+//******************************************/
+
+LiquidCrystal lcd(RS, EN, D4, D5, D6, D7);
+
+ESP32SPISlave slave;
+
+static constexpr size_t BUFFER_SIZE = 32;
+uint8_t tx_buf[BUFFER_SIZE];
+uint8_t rx_buf[BUFFER_SIZE];
+
+uint16_t ultimo_valor_pot = 0;
+String ultimo_color_led = "NONE";
+
+//******************************************/
+// Prototipos de funciones
+//******************************************/
+
+void inicializarLCD();
+void updateLCD();
+void onI2CRequest();
+
+//******************************************/
+// Configuración
+//******************************************/
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000); 
+  
+  Serial.println("Iniciando ESP32 Slave...");
+  
+  pinMode(LED_VERDE, OUTPUT);
+  pinMode(LED_AMARILLO, OUTPUT);
+  pinMode(LED_ROJO, OUTPUT);
+
+  digitalWrite(LED_VERDE, LOW);
+  digitalWrite(LED_AMARILLO, LOW);
+  digitalWrite(LED_ROJO, LOW);
+
+  pinMode(POT1, INPUT);
+
+  // Configuración SPI
+  slave.setDataMode(SPI_MODE0);
+  slave.setQueueSize(1);
+  slave.begin(VSPI, PIN_SCK, PIN_MISO, PIN_MOSI, PIN_CS);
+
+  // Configuración I2C como esclavo
+  Wire.begin(I2C_ADDRESS);
+  Wire.onRequest(onI2CRequest);
+
+  // Configuración LCD
+  inicializarLCD();
+
+  // Buffer inicial
+  memset(tx_buf, 0, BUFFER_SIZE);
+  memset(rx_buf, 0, BUFFER_SIZE);
+  strcpy((char*)tx_buf, "READY");
+
+  slave.queue(tx_buf, rx_buf, BUFFER_SIZE);
+  slave.trigger();
+
+  Serial.println("ESP32 SPI Slave - Listo");
+}
+
+void loop() {
+  if (slave.hasTransactionsCompletedAndAllResultsReady(1)) {
+
+    size_t bytesRecibidos = slave.numBytesReceived();
+
+    if (bytesRecibidos > 0 && bytesRecibidos < BUFFER_SIZE) {
+      rx_buf[bytesRecibidos] = '\0'; 
+
+      Serial.printf("Datos recibidos: %s\n", (char*)rx_buf);
+
+      int led = 0;
+      int tiempo = 0;
+
+      if (sscanf((char*)rx_buf, "%d,%d", &led, &tiempo) == 2) {
+      
+        int pinLed = 0;
+        if (led == 1) pinLed = LED_VERDE;
+        else if (led == 2) pinLed = LED_AMARILLO;
+        else if (led == 3) pinLed = LED_ROJO;
+
+        if (pinLed != 0) {
+          digitalWrite(pinLed, HIGH);
+          delay(tiempo);
+          digitalWrite(pinLed, LOW);
+          strcpy((char*)tx_buf, "OK");
+          ultimo_color_led = (led == 1) ? "VERDE" : (led == 2) ? "AMARILLO" : "ROJO";
+        } else {
+          strcpy((char*)tx_buf, "LED?");
+        }
+
+      } else {
+        strcpy((char*)tx_buf, "ERR");
+      }
+    } else {
+      Serial.println("Error: tamaño de datos fuera de rango");
+      strcpy((char*)tx_buf, "SIZE?");
+    }
+
+    // Re-armar buffers para la siguiente transacción
+    slave.queue(tx_buf, rx_buf, BUFFER_SIZE);
+    slave.trigger();
+
+    delay(50);
+  }
+
+  // Actualizar LCD
+  updateLCD();
+}
+
+
+
+//******************************************/
+// Otras funciones
+//******************************************/
+
+void onI2CRequest() {
+    // Leer y enviar valor del potenciómetro
+    ultimo_valor_pot = analogRead(POT1);
+    
+    if (ultimo_valor_pot > 4095) {
+        ultimo_valor_pot = 4095;
+    }
+    
+    uint8_t data[2];
+    data[0] = ultimo_valor_pot & 0xFF;         // Byte bajo
+    data[1] = (ultimo_valor_pot >> 8) & 0xFF;  // Byte alto
+    
+    Wire.write(data, 2);
+}
+
+void inicializarLCD() {
+  lcd.begin(16, 2);
+  lcd.clear();
+
+  // Primera linea
+  lcd.setCursor(0, 0);
+  lcd.print("Pot1: Pot1:  LED:");
+  
+  // Segunda linea
+  lcd.setCursor(0, 1);
+  lcd.print("0.00V 0   N");
+}
+
+void updateLCD() {
+  static unsigned long last_update = 0;
+  static uint16_t valor_mostrado_pot = 0;
+  static String valor_mostrado_led = "";
+  
+  if (millis() - last_update > 500) {
+    last_update = millis();
+    
+    //actualizar al cambio
+    if (valor_mostrado_pot != ultimo_valor_pot || valor_mostrado_led != ultimo_color_led) {
+      valor_mostrado_pot = ultimo_valor_pot;
+      valor_mostrado_led = ultimo_color_led;
+      
+      float voltage = (ultimo_valor_pot * 3.3) / 4095.0;
+      uint8_t pot_8bit = map(ultimo_valor_pot, 0, 4095, 0, 255);
+      
+      char led_char = ' ';
+      if (ultimo_color_led == "VERDE") led_char = 'G';
+      else if (ultimo_color_led == "AMARILLO") led_char = 'Y'; 
+      else if (ultimo_color_led == "ROJO") led_char = 'R';
+      
+      //primera linea lcd
+      lcd.setCursor(0, 0);
+      lcd.print("Pot1: Pot1: LED:");  
+      
+      // segunda linea lcd
+      lcd.setCursor(0, 1);
+      
+      char volt_str[6];
+      dtostrf(voltage, 4, 2, volt_str);
+      lcd.print(volt_str);
+      lcd.print("V");
+      
+      lcd.setCursor(7, 1);
+      lcd.print("   ");  // Limpiar campo para actualizar
+      lcd.setCursor(7, 1);
+      lcd.print(pot_8bit);
+      
+      lcd.setCursor(13, 1);
+      lcd.print(" ");  // Limpiar campo para actualizar
+      
+      lcd.setCursor(14, 1);
+      lcd.print(led_char);
+      
+    }
+  }
+}
